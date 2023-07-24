@@ -1118,12 +1118,6 @@ int CUDTUnited::epoll_remove_usock(const int eid, const UDTSOCKET u)
    {
       s->m_pUDT->removeEPoll(eid);
    }
-   else
-   {
-       // so there is no longer a socket to locate (let's make sure we reset the trigger condition anyway)
-       // if we don't know the socket this simply wastes some time 
-       CUDT::removeEPoll(eid, u);
-   }
    //else
    //{
    //   throw CUDTException(5, 4);
@@ -2269,7 +2263,7 @@ int64_t sendfile2(UDTSOCKET u, const char* path, int64_t* offset, int64_t size, 
 
 int64_t recvfile2(UDTSOCKET u, const char* path, int64_t* offset, int64_t size, int block)
 {
-   fstream ofs(path, ios::binary | ios::out);
+   fstream ofs(path, ios::binary | ios::out | ios::app);
    int64_t ret = CUDT::recvfile(u, ofs, *offset, size, block);
    ofs.close();
    return ret;

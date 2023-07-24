@@ -167,7 +167,7 @@ CUDT::CUDT(const CUDT& ancestor)
    m_bRendezvous = ancestor.m_bRendezvous;
    m_iSndTimeOut = ancestor.m_iSndTimeOut;
    m_iRcvTimeOut = ancestor.m_iRcvTimeOut;
-   m_bReuseAddr = true; // this must be true, because all accepted sockets shared the same port with the listener
+   m_bReuseAddr = true;	// this must be true, because all accepted sockets shared the same port with the listener
    m_llMaxBW = ancestor.m_llMaxBW;
 
    m_pCCFactory = ancestor.m_pCCFactory->clone();
@@ -642,7 +642,7 @@ void CUDT::connect(const sockaddr* serv_addr)
 
    CUDTException e(0, 0);
 
-   while (!m_bClosing && m_bConnecting)
+   while (!m_bClosing)
    {
       // avoid sending too many requests, at most 1 request per 250ms
       if (CTimer::getTime() - m_llLastReqTime > 250000)
@@ -671,11 +671,6 @@ void CUDT::connect(const sockaddr* serv_addr)
          e = CUDTException(1, 1, 0);
          break;
       }
-   }
-
-   if (!m_bConnected)
-   {
-       m_pRcvQueue->removeConnector(m_SocketID);
    }
 
    delete [] reqdata;
@@ -962,7 +957,7 @@ void CUDT::close()
    try
    {
       for (set<int>::iterator i = m_sPollID.begin(); i != m_sPollID.end(); ++ i)
-         s_UDTUnited.m_EPoll.remove_usock(*i, m_SocketID);
+         s_UDTUnited.m_EPoll.force_remove_usock(*i, m_SocketID);
    }
    catch (...)
    {
@@ -979,14 +974,18 @@ void CUDT::close()
    // Signal the sender and recver if they are waiting for data.
    releaseSynch();
 
-   if (m_bListening)
+   if (m_pRcvQueue != NULL)
    {
-      m_bListening = false;
-      m_pRcvQueue->removeListener(this);
-   }
-   else if (m_bConnecting)
-   {
-      m_pRcvQueue->removeConnector(m_SocketID);
+       if (m_bListening)
+       {
+           m_bListening = false;
+           m_pRcvQueue->removeListener(this);
+       }
+       else if (m_bConnecting)
+       {
+           m_bConnecting = false;
+           m_pRcvQueue->removeConnector(m_SocketID);
+       }
    }
 
    if (m_bConnected)
@@ -1631,8 +1630,21 @@ void CUDT::sample(CPerfMon* perf, bool clear)
       if (WAIT_OBJECT_0 == WaitForSingleObject(m_ConnectionLock, 0))
    #endif
    {
-      perf->byteAvailSndBuf = (NULL == m_pSndBuffer) ? 0 : (m_iSndBufSize - m_pSndBuffer->getCurrBufSize()) * m_iMSS;
-      perf->byteAvailRcvBuf = (NULL == m_pRcvBuffer) ? 0 : m_pRcvBuffer->getAvailBufSize() * m_iMSS;
+      try
+      {
+          perf->byteAvailSndBuf = (NULL == m_pSndBuffer) ? 0 : (m_iSndBufSize - m_pSndBuffer->getCurrBufSize()) * m_iMSS;
+          perf->byteAvailRcvBuf = (NULL == m_pRcvBuffer) ? 0 : m_pRcvBuffer->getAvailBufSize() * m_iMSS;
+      }
+      catch (...)
+      {
+         // so we don't blow past the unlock on an exception
+#ifndef WIN32
+          pthread_mutex_unlock(&m_ConnectionLock);
+#else
+          ReleaseMutex(m_ConnectionLock);
+#endif
+          throw;
+      }
 
       #ifndef WIN32
          pthread_mutex_unlock(&m_ConnectionLock);
@@ -2016,29 +2028,28 @@ void CUDT::processCtrl(CPacket& ctrlpkt)
       }
 
       // protect packet retransmission
-      CGuard::enterCS(m_AckLock);
-
-      int offset = CSeqNo::seqoff(m_iSndLastDataAck, ack);
-      if (offset <= 0)
       {
-         // discard it if it is a repeated ACK
-         CGuard::leaveCS(m_AckLock);
-         break;
+         CGuard ackGuard(m_AckLock);
+
+         int offset = CSeqNo::seqoff(m_iSndLastDataAck, ack);
+         if (offset <= 0)
+         {
+            // discard it if it is a repeated ACK
+            break;
+         }
+
+         // acknowledge the sending buffer
+         m_pSndBuffer->ackData(offset);
+
+         // record total time used for sending
+         m_llSndDuration += currtime - m_llSndDurationCounter;
+         m_llSndDurationTotal += currtime - m_llSndDurationCounter;
+         m_llSndDurationCounter = currtime;
+
+         // update sending variables
+         m_iSndLastDataAck = ack;
+         m_pSndLossList->remove(CSeqNo::decseq(m_iSndLastDataAck));
       }
-
-      // acknowledge the sending buffer
-      m_pSndBuffer->ackData(offset);
-
-      // record total time used for sending
-      m_llSndDuration += currtime - m_llSndDurationCounter;
-      m_llSndDurationTotal += currtime - m_llSndDurationCounter;
-      m_llSndDurationCounter = currtime;
-
-      // update sending variables
-      m_iSndLastDataAck = ack;
-      m_pSndLossList->remove(CSeqNo::decseq(m_iSndLastDataAck));
-
-      CGuard::leaveCS(m_AckLock);
 
       #ifndef WIN32
          pthread_mutex_lock(&m_SendBlockLock);
@@ -2648,9 +2659,10 @@ void CUDT::checkTimers()
 
 void CUDT::addEPoll(const int eid)
 {
-   CGuard::enterCS(s_UDTUnited.m_EPoll.m_EPollLock);
-   m_sPollID.insert(eid);
-   CGuard::leaveCS(s_UDTUnited.m_EPoll.m_EPollLock);
+   {
+      CGuard epollGuard(s_UDTUnited.m_EPoll.m_EPollLock);
+      m_sPollID.insert(eid);
+   }
 
    if (!m_bConnected || m_bBroken || m_bClosing)
       return;
@@ -2666,21 +2678,14 @@ void CUDT::addEPoll(const int eid)
    }
 }
 
-void CUDT::removeEPoll(const int eid, UDTSOCKET u)
+void CUDT::removeEPoll(const int eid)
 {
    // clear IO events notifications;
    // since this happens after the epoll ID has been removed, they cannot be set again
    set<int> remove;
    remove.insert(eid);
-   s_UDTUnited.m_EPoll.update_events(u, remove, UDT_EPOLL_IN | UDT_EPOLL_OUT, false);
-}
+   s_UDTUnited.m_EPoll.update_events(m_SocketID, remove, UDT_EPOLL_IN | UDT_EPOLL_OUT, false);
 
-
-void CUDT::removeEPoll(const int eid)
-{
-   CUDT::removeEPoll(eid, m_SocketID);
-
-   CGuard::enterCS(s_UDTUnited.m_EPoll.m_EPollLock);
+   CGuard epollGuard(s_UDTUnited.m_EPoll.m_EPollLock);
    m_sPollID.erase(eid);
-   CGuard::leaveCS(s_UDTUnited.m_EPoll.m_EPollLock);
 }

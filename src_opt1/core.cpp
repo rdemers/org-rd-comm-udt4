@@ -116,6 +116,8 @@ CUDT::CUDT()
    m_iRcvTimeOut = -1;
    m_bReuseAddr = true;
    m_llMaxBW = -1;
+   m_iConnectTimeOut = 3000;
+   m_iRendezvousConnectTimeOut = m_iConnectTimeOut*10;
 
    m_pCCFactory = new CCCFactory<CUDTCC>;
    m_pCC = NULL;
@@ -167,7 +169,7 @@ CUDT::CUDT(const CUDT& ancestor)
    m_bRendezvous = ancestor.m_bRendezvous;
    m_iSndTimeOut = ancestor.m_iSndTimeOut;
    m_iRcvTimeOut = ancestor.m_iRcvTimeOut;
-   m_bReuseAddr = true; // this must be true, because all accepted sockets shared the same port with the listener
+   m_bReuseAddr = true;	// this must be true, because all accepted sockets shared the same port with the listener
    m_llMaxBW = ancestor.m_llMaxBW;
 
    m_pCCFactory = ancestor.m_pCCFactory->clone();
@@ -345,7 +347,15 @@ void CUDT::setOpt(UDTOpt optName, const void* optval, int)
    case UDT_MAXBW:
       m_llMaxBW = *(int64_t*)optval;
       break;
-    
+
+   case UDT_CONNECTTIMEO:
+      m_iConnectTimeOut = *(int*)optval;
+      break;
+
+   case UDT_RENDEZVOUSCONNECTTIMEO:
+      m_iRendezvousConnectTimeOut = *(int*)optval;
+      break;
+
    default:
       throw CUDTException(5, 0, 0);
    }
@@ -476,6 +486,16 @@ void CUDT::getOpt(UDTOpt optName, void* optval, int& optlen)
       optlen = sizeof(int32_t);
       break;
 
+   case UDT_CONNECTTIMEO:
+      *(int*)optval = m_iConnectTimeOut;
+      optlen = sizeof(int);
+      break;
+
+   case UDT_RENDEZVOUSCONNECTTIMEO:
+      *(int*)optval = m_iRendezvousConnectTimeOut;
+      optlen = sizeof(int);
+      break;
+
    default:
       throw CUDTException(5, 0, 0);
    }
@@ -589,9 +609,10 @@ void CUDT::connect(const sockaddr* serv_addr)
 
    // register this socket in the rendezvous queue
    // RendezevousQueue is used to temporarily store incoming handshake, non-rendezvous connections also require this function
-   uint64_t ttl = 3000000;
-   if (m_bRendezvous)
-      ttl *= 10;
+   uint64_t ttl = m_iConnectTimeOut * 1000ULL;
+   if (m_bRendezvous) 
+       ttl = m_iRendezvousConnectTimeOut * 1000ULL;
+   
    ttl += CTimer::getTime();
    m_pRcvQueue->registerConnector(m_SocketID, this, m_iIPversion, serv_addr, ttl);
 
@@ -642,7 +663,7 @@ void CUDT::connect(const sockaddr* serv_addr)
 
    CUDTException e(0, 0);
 
-   while (!m_bClosing && m_bConnecting)
+   while (!m_bClosing)
    {
       // avoid sending too many requests, at most 1 request per 250ms
       if (CTimer::getTime() - m_llLastReqTime > 250000)
@@ -671,11 +692,6 @@ void CUDT::connect(const sockaddr* serv_addr)
          e = CUDTException(1, 1, 0);
          break;
       }
-   }
-
-   if (!m_bConnected)
-   {
-       m_pRcvQueue->removeConnector(m_SocketID);
    }
 
    delete [] reqdata;
@@ -2666,19 +2682,13 @@ void CUDT::addEPoll(const int eid)
    }
 }
 
-void CUDT::removeEPoll(const int eid, UDTSOCKET u)
+void CUDT::removeEPoll(const int eid)
 {
    // clear IO events notifications;
    // since this happens after the epoll ID has been removed, they cannot be set again
    set<int> remove;
    remove.insert(eid);
-   s_UDTUnited.m_EPoll.update_events(u, remove, UDT_EPOLL_IN | UDT_EPOLL_OUT, false);
-}
-
-
-void CUDT::removeEPoll(const int eid)
-{
-   CUDT::removeEPoll(eid, m_SocketID);
+   s_UDTUnited.m_EPoll.update_events(m_SocketID, remove, UDT_EPOLL_IN | UDT_EPOLL_OUT, false);
 
    CGuard::enterCS(s_UDTUnited.m_EPoll.m_EPollLock);
    m_sPollID.erase(eid);

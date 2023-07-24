@@ -167,7 +167,7 @@ CUDT::CUDT(const CUDT& ancestor)
    m_bRendezvous = ancestor.m_bRendezvous;
    m_iSndTimeOut = ancestor.m_iSndTimeOut;
    m_iRcvTimeOut = ancestor.m_iRcvTimeOut;
-   m_bReuseAddr = true; // this must be true, because all accepted sockets shared the same port with the listener
+   m_bReuseAddr = true;	// this must be true, because all accepted sockets shared the same port with the listener
    m_llMaxBW = ancestor.m_llMaxBW;
 
    m_pCCFactory = ancestor.m_pCCFactory->clone();
@@ -642,7 +642,7 @@ void CUDT::connect(const sockaddr* serv_addr)
 
    CUDTException e(0, 0);
 
-   while (!m_bClosing && m_bConnecting)
+   while (!m_bClosing)
    {
       // avoid sending too many requests, at most 1 request per 250ms
       if (CTimer::getTime() - m_llLastReqTime > 250000)
@@ -671,11 +671,6 @@ void CUDT::connect(const sockaddr* serv_addr)
          e = CUDTException(1, 1, 0);
          break;
       }
-   }
-
-   if (!m_bConnected)
-   {
-       m_pRcvQueue->removeConnector(m_SocketID);
    }
 
    delete [] reqdata;
@@ -2641,8 +2636,6 @@ void CUDT::checkTimers()
       }
 
       ++ m_iEXPCount;
-      // Reset last response time since we just sent a heart-beat.
-      m_ullLastRspTime = currtime;
    }
 }
 
@@ -2666,19 +2659,13 @@ void CUDT::addEPoll(const int eid)
    }
 }
 
-void CUDT::removeEPoll(const int eid, UDTSOCKET u)
+void CUDT::removeEPoll(const int eid)
 {
    // clear IO events notifications;
    // since this happens after the epoll ID has been removed, they cannot be set again
    set<int> remove;
    remove.insert(eid);
-   s_UDTUnited.m_EPoll.update_events(u, remove, UDT_EPOLL_IN | UDT_EPOLL_OUT, false);
-}
-
-
-void CUDT::removeEPoll(const int eid)
-{
-   CUDT::removeEPoll(eid, m_SocketID);
+   s_UDTUnited.m_EPoll.update_events(m_SocketID, remove, UDT_EPOLL_IN | UDT_EPOLL_OUT, false);
 
    CGuard::enterCS(s_UDTUnited.m_EPoll.m_EPollLock);
    m_sPollID.erase(eid);
